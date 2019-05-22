@@ -6,9 +6,12 @@
  */
 
 #include <cmath>
-#include <ctime>
+#include <deque>
+#include <limits>
 #include <omp.h>
 
+#include "../auxiliary/Parallel.h"
+#include "../auxiliary/Parallelism.h"
 #include "../auxiliary/Random.h"
 #include "../auxiliary/Timer.h"
 #include "../distance/Diameter.h"
@@ -20,11 +23,14 @@ Status::Status(const count k)
     : k(k), top(k), approxTop(k), finished(k), bet(k), errL(k), errU(k) {}
 
 KadabraBetweenness::KadabraBetweenness(const Graph &G, const double err,
-                                       const double delta, const count k,
+                                       const double delta,
+                                       const bool deterministic, const count k,
                                        count unionSample,
                                        const count startFactor)
-    : G(G), err(err), delta(delta), k(k), n(G.upperNodeIdBound()),
-      startFactor(startFactor), unionSample(unionSample), absolute(k == 0) {
+    : G(G), err(err), delta(delta), deterministic(deterministic), k(k),
+      startFactor(startFactor), unionSample(unionSample), absolute(k == 0),
+      stop(false) {
+	const count n = G.upperNodeIdBound();
 	if (k > n) {
 		throw std::runtime_error(
 		    "k is higher than the number of nodes of the input graph! Choose a "
@@ -41,10 +47,8 @@ KadabraBetweenness::KadabraBetweenness(const Graph &G, const double err,
 		    "The error should be greater than 0 and smaller than 1.");
 	}
 
-	if (!Aux::Random::getUseThreadId()) {
-		throw std::runtime_error(
-		    "Error: the Kadabra algorithm needs 'useThreadId' set to true.");
-	}
+	seed0 = Aux::Random::integer();
+	seed1 = Aux::Random::integer();
 }
 
 bool KadabraBetweenness::computeFinished(Status *status) const {
@@ -55,14 +59,14 @@ bool KadabraBetweenness::computeFinished(Status *status) const {
 
 	count i;
 	for (i = 0; i < status->k - 1; ++i) {
-		bet[i] = status->approxTop[i] / (double)status->nPairs;
-		errL[i] = computeF(bet[i], status->nPairs, deltaLGuess[status->top[i]]);
-		errU[i] = computeG(bet[i], status->nPairs, deltaUGuess[status->top[i]]);
+		bet[i] = status->approxTop[i] / (double)nPairs;
+		errL[i] = computeF(bet[i], nPairs, deltaLGuess[status->top[i]]);
+		errU[i] = computeG(bet[i], nPairs, deltaUGuess[status->top[i]]);
 	}
 
-	bet[i] = status->approxTop[i] / (double)status->nPairs;
-	errL[i] = computeF(bet[i], status->nPairs, this->deltaLMinGuess);
-	errU[i] = computeG(bet[i], status->nPairs, this->deltaUMinGuess);
+	bet[i] = status->approxTop[i] / (double)nPairs;
+	errL[i] = computeF(bet[i], nPairs, this->deltaLMinGuess);
+	errU[i] = computeG(bet[i], nPairs, this->deltaUMinGuess);
 
 	if (absolute) {
 		for (count i = 0; i < status->k; ++i) {
@@ -110,13 +114,6 @@ double KadabraBetweenness::computeG(const double btilde, const count iterNum,
 	return std::min(errChern, 1 - btilde);
 }
 
-void KadabraBetweenness::oneRound(SpSampler &sampler) {
-	auto path = sampler.randomPath();
-	for (node u : path) {
-		approx[omp_get_thread_num()][u] += 1.;
-	}
-}
-
 void KadabraBetweenness::getStatus(Status *status, const bool parallel) const {
 	if (status != NULL) {
 		auto loop = [&](count i) {
@@ -138,7 +135,6 @@ void KadabraBetweenness::getStatus(Status *status, const bool parallel) const {
 				loop(i);
 			}
 		}
-		status->nPairs = nPairs;
 	}
 }
 
@@ -149,7 +145,7 @@ void KadabraBetweenness::computeBetErr(Status *status, std::vector<double> &bet,
 	double maxErr = std::sqrt(startFactor) * err / 4.;
 
 	for (i = 0; i < status->k; ++i) {
-		bet[i] = status->approxTop[i] / (double)status->nPairs;
+		bet[i] = status->approxTop[i] / (double)nPairs;
 	}
 
 	if (absolute) {
@@ -188,6 +184,8 @@ void KadabraBetweenness::computeBetErr(Status *status, std::vector<double> &bet,
 }
 
 void KadabraBetweenness::computeDeltaGuess() {
+	const count n = G.upperNodeIdBound();
+	const double balancingFactor = 0.001;
 	double a = 0,
 	       b = 1. / err / err * std::log(n * 4 * (1 - balancingFactor) / delta),
 	       c = (a + b) / 2;
@@ -248,36 +246,39 @@ void KadabraBetweenness::computeDeltaGuess() {
 	}
 }
 
-void KadabraBetweenness::computeApproxParallel(const bool normalize) {
+void KadabraBetweenness::computeApproxParallel(
+    const std::vector<StateFrame> &firstFrames) {
+	const auto omp_max_threads = omp_get_max_threads();
 #pragma omp parallel for
-	for (omp_index i = 0; i < static_cast<omp_index>(n); ++i) {
-		approxSum[i] = 0.;
+	for (omp_index i = 0; i < static_cast<omp_index>(G.upperNodeIdBound()); ++i) {
 		for (count j = 0; j < omp_max_threads; ++j) {
-			approxSum[i] += approx[j][i];
-		}
-		if (normalize) {
-			approxSum[i] /= (double)nPairs;
-			if (!G.isDirected()) {
-				approxSum[i] *= 2.;
-			}
+			approxSum[i] += firstFrames[j].apx[i];
 		}
 	}
 }
 
 void KadabraBetweenness::init() {
-	omp_max_threads = omp_get_max_threads();
-	approx.assign(omp_max_threads, std::vector<double>(n, 0.));
-	approxSum.resize(n);
-	deltaLGuess.resize(n);
-	deltaUGuess.resize(n);
-	nPairs = 0;
+	const count n = G.upperNodeIdBound();
+	const auto omp_max_threads = omp_get_max_threads();
+	approxSum.resize(n, 0);
+	deltaLGuess.resize(n, 0);
+	deltaUGuess.resize(n, 0);
 	if (!G.isDirected()) {
 		cc = new ConnectedComponents(G);
 		cc->run();
 	}
+	epochFinished = std::vector<std::atomic<StateFrame *>>(omp_max_threads);
+	samplerVec.reserve(omp_max_threads);
+	for (count i = 0; i < omp_max_threads; ++i) {
+		samplerVec.emplace_back(SpSampler(G, *cc));
+		epochFinished[i].store(nullptr, std::memory_order_relaxed);
+	}
+
+	maxFrames.resize(omp_max_threads, 0);
 }
 
 void KadabraBetweenness::fillResult() {
+	const count n = G.upperNodeIdBound();
 	if (absolute) {
 		topkScores.resize(n);
 		topkNodes.resize(n);
@@ -286,10 +287,11 @@ void KadabraBetweenness::fillResult() {
 		for (omp_index i = 0; i < static_cast<omp_index>(n); ++i) {
 			rankingVector[i] = std::make_pair(i, approxSum[i]);
 		}
-		std::sort(rankingVector.begin(), rankingVector.end(),
-		          [&](std::pair<node, double> p1, std::pair<node, double> p2) {
-			          return p1.second > p2.second;
-		          });
+		Aux::Parallel::sort(
+		    rankingVector.begin(), rankingVector.end(),
+		    [&](std::pair<node, double> p1, std::pair<node, double> p2) {
+			    return p1.second > p2.second;
+		    });
 #pragma omp parallel for
 		for (omp_index i = 0; i < static_cast<omp_index>(n); ++i) {
 			topkNodes[i] = rankingVector[i].first;
@@ -310,12 +312,18 @@ void KadabraBetweenness::fillResult() {
 
 void KadabraBetweenness::run() {
 	init();
-
+	const count n = G.upperNodeIdBound();
+	const uint8_t itersPerStep = 11;
+	const auto omp_max_threads = omp_get_max_threads();
 	// TODO: setting the maximum relateve error to 0 gives the exact diameter but
 	// may be inefficient for large graphs. What is the maximum relative error
 	// that we can tolerate?
+	Aux::Timer timer;
+	timer.start();
 	Diameter diam(G, estimatedRange, 0.f);
 	diam.run();
+	timer.stop();
+	diamTime = timer.elapsedMilliseconds();
 	// Getting diameter upper bound
 	int32_t diameter = diam.getDiameter().second;
 	omega =
@@ -341,59 +349,116 @@ void KadabraBetweenness::run() {
 		this->top = new Aux::SortedList(unionSample, n);
 	}
 
-#pragma omp parallel
-	{
-		SpSampler sampler(G, *cc);
-		while (nPairs <= tau) {
-			oneRound(sampler);
-			++nPairs;
-		}
+	std::vector<StateFrame> firstFrames(omp_max_threads, StateFrame(n));
+
+	timer.start();
+#pragma omp parallel for
+	for (omp_index i = 0; i < static_cast<omp_index>(tau); ++i) {
+		auto t = omp_get_thread_num();
+		samplerVec[t].rng.seed(seed0 ^ i);
+		samplerVec[t].randomPath(&firstFrames[t]);
 	}
 
-	computeApproxParallel();
+	nPairs = tau;
+
+	epochToRead.store(0, std::memory_order_relaxed);
+	computeApproxParallel(firstFrames);
 	if (!absolute) {
 		fillPQ();
 	}
 	computeDeltaGuess();
 	nPairs = 0;
-	std::atomic<bool> stop(false);
+	std::fill(approxSum.begin(), approxSum.end(), 0.0);
+	epochToRead.store(-1, std::memory_order_relaxed);
+	epochRead = -1;
+
 	if (!absolute) {
 		top->clear();
 	}
-#pragma omp parallel for
-	for (omp_index i = 0; i < static_cast<omp_index>(omp_max_threads); ++i) {
-		std::fill(approx[i].begin(), approx[i].end(), 0.);
-	}
+	timer.stop();
+	firstPartTime = timer.elapsedMilliseconds();
 
+	timer.start();
+	Status status(unionSample);
 #pragma omp parallel
 	{
-		SpSampler sampler(G, *cc);
-		Status status(unionSample);
-		status.nPairs = 0;
+		const omp_index t = omp_get_thread_num();
+		SpSampler &sampler = samplerVec[t];
+		std::deque<StateFrame *> unused;
+		int32_t epochToWrite = 0;
+		StateFrame *curFrame = &firstFrames[t];
+		std::deque<StateFrame *> finishedQueue;
+		maxFrames[t] = 0;
 
-		while (!stop && nPairs < omega) {
-			for (unsigned short i = 0; i < itersPerStep; ++i) {
-				oneRound(sampler);
+		auto moveToNextEpoch = [&]() {
+			++epochToWrite;
+			if (unused.empty()) {
+				curFrame = new StateFrame(n);
+				++maxFrames[t];
+			} else {
+				curFrame = unused.front();
+				unused.pop_front();
 			}
-			nPairs += itersPerStep;
-			if (omp_get_thread_num() == 0) {
-				for (count i = 0; i < n; ++i) {
-					approxSum[i] = 0.;
-					for (count j = 0; j < omp_max_threads; ++j) {
-						approxSum[i] += approx[j][i];
-					}
-					if (!absolute) {
-						top->insert(i, approxSum[i]);
-					}
-				}
+			curFrame->reset(epochToWrite);
+			sampler.rng.seed(seed1 ^ (epochToWrite * omp_get_max_threads() + t));
+		};
 
-				getStatus(&status);
-				stop = computeFinished(&status);
+		auto recycleFrame = [&]() {
+			auto finishedFrame = epochFinished[t].load(std::memory_order_relaxed);
+			if (finishedFrame) {
+				unused.push_back(finishedFrame);
+			}
+		};
+
+		sampler.rng.seed(seed1 ^ (epochToWrite * omp_get_max_threads() + t));
+		while (!stop && nPairs < omega) {
+			// Reader thread
+			if (t == 0) {
+				if (epochToRead.load(std::memory_order_acquire) == epochRead) {
+					epochToRead.store(epochRead + 1, std::memory_order_release);
+				}
+				checkConvergence(status);
+			}
+
+			auto etr = epochToRead.load(std::memory_order_acquire);
+			if (!deterministic) {
+				if (etr == epochToWrite) {
+					recycleFrame();
+					epochFinished[t].store(curFrame, std::memory_order_release);
+					moveToNextEpoch();
+				}
+			} else if (!finishedQueue.empty()) {
+				if (etr == finishedQueue.front()->epoch) {
+					recycleFrame();
+					epochFinished[t].store(finishedQueue.front(),
+					                       std::memory_order_release);
+					finishedQueue.pop_front();
+				}
+			}
+
+			for (uint8_t i = 0; i < itersPerStep; ++i) {
+				sampler.randomPath(curFrame);
+			}
+
+			curFrame->nPairs += itersPerStep;
+			if (deterministic && curFrame->nPairs > 1000) {
+				finishedQueue.push_back(curFrame);
+				moveToNextEpoch();
 			}
 		}
 	}
 
-	computeApproxParallel(true);
+	timer.stop();
+	secondPartTime = timer.elapsedMilliseconds();
+
+#pragma omp parallel for
+	for (omp_index i = 0; i < static_cast<omp_index>(n); ++i) {
+		approxSum[i] /= (double)nPairs;
+		if (!G.isDirected()) {
+			approxSum[i] *= 2.;
+		}
+	}
+
 	if (!absolute) {
 		// It should not be necessary to clear it again, but otherwise the
 		// ranking is wrong.
@@ -402,44 +467,88 @@ void KadabraBetweenness::run() {
 	}
 	fillResult();
 	nPairs += tau;
-	hasRun = true;
+
 	if (!absolute) {
-		delete (top);
+		delete top;
+		top = NULL;
+	}
+	if (!G.isDirected()) {
+		delete cc;
+		cc = NULL;
+	}
+
+	hasRun = true;
+}
+
+void KadabraBetweenness::checkConvergence(Status &status) {
+	bool allEpochsFinished = true;
+	const auto omp_max_threads = omp_get_max_threads();
+	for (count i = 0; i < omp_max_threads; ++i) {
+		auto frame = epochFinished[i].load(std::memory_order_acquire);
+		if (!frame || frame->epoch != epochToRead.load(std::memory_order_relaxed)) {
+			allEpochsFinished = false;
+			break;
+		}
+	}
+
+	if (allEpochsFinished) {
+		const count n = G.upperNodeIdBound();
+		for (count j = 0; j < omp_max_threads; ++j) {
+			auto frame = epochFinished[j].load(std::memory_order_relaxed);
+			for (count i = 0; i < n; ++i) {
+				approxSum[i] += frame->apx[i];
+			}
+			nPairs += frame->nPairs;
+		}
+		if (!absolute) {
+			for (count i = 0; i < n; ++i) {
+				top->insert(i, approxSum[i]);
+			}
+		}
+
+		getStatus(&status);
+		stop = computeFinished(&status);
+		epochRead = epochToRead.load(std::memory_order_relaxed);
 	}
 }
 
 SpSampler::SpSampler(const Graph &G, const ConnectedComponents &cc)
-    : G(G), n(G.upperNodeIdBound()), pred(n, false, true), cc(cc) {
+    : G(G), cc(cc), rng(0) {
+	const auto n = G.upperNodeIdBound();
+	distr = std::uniform_int_distribution<node>(0, n - 1);
 	q.resize(n);
-	ballInd.assign(n, 0);
-	dist.resize(n);
+	timestamp.assign(n, 0);
+	dist.assign(n, std::numeric_limits<count>::max());
 	nPaths.resize(n);
 }
 
-std::vector<node> SpSampler::randomPath() {
-	node u = G.randomNode();
-	node v = G.randomNode();
+void SpSampler::randomPath(StateFrame *curFrame) {
+	frame = curFrame;
+	node u = distr(rng);
+	node v = distr(rng);
 	while (u == v) {
-		v = G.randomNode();
+		v = distr(rng);
 	}
 
 	if (!G.isDirected() && cc.componentOfNode(u) != cc.componentOfNode(v)) {
-		return std::vector<node>();
+		return;
 	}
 
 	count endQ = 2;
 	q[0] = u;
 	q[1] = v;
 
-	ballInd[u] = 1;
-	ballInd[v] = 2;
+	timestamp[u] = globalTS;
+	// Setting 8-th bit to 1 (i.e. ball indicator for nodes visited from
+	// target).
+	timestamp[v] = globalTS + ballMask;
 
 	dist[u] = 0;
 	dist[v] = 0;
 	nPaths[u] = 1;
 	nPaths[v] = 1;
 
-	std::vector<std::pair<node, node>> spEdges;
+	spEdges.clear();
 
 	node x, randomEdge;
 	bool hasToStop = false, useDegreeIn;
@@ -448,21 +557,20 @@ std::vector<node> SpSampler::randomPath() {
 	count sumDegsU = 0, sumDegsV = 0, *sumDegsCur;
 	count totWeight = 0, curEdge = 0;
 
-	auto procNeighbor = [&](node x, node y) {
-		if (ballInd[y] == 0) {
+	auto procNeighbor = [&](const node x, const node y) {
+		// Node not visited
+		if ((timestamp[y] & stampMask) != globalTS) {
 			(*sumDegsCur) += getDegree(G, y, useDegreeIn);
 			nPaths[y] = nPaths[x];
-			ballInd[y] = ballInd[x];
+			timestamp[y] = globalTS + (timestamp[x] & ballMask);
 			q[endQ++] = y;
-			(*newEndCur)++;
-			pred.addEdge(y, x);
+			++(*newEndCur);
 			dist[y] = dist[x] + 1;
-		} else if (ballInd[x] != ballInd[y]) {
+		} else if ((timestamp[x] & ballMask) != (timestamp[y] & ballMask)) {
 			hasToStop = true;
 			spEdges.push_back(std::make_pair(x, y));
 		} else if (dist[y] == dist[x] + 1) {
 			nPaths[y] += nPaths[x];
-			pred.addEdge(y, x);
 		}
 	};
 
@@ -491,9 +599,9 @@ std::vector<node> SpSampler::randomPath() {
 			x = q[startCur++];
 
 			if (useDegreeIn) {
-				G.forInNeighborsOf(x, [&](node y) { procNeighbor(x, y); });
+				G.forInNeighborsOf(x, [&](const node y) { procNeighbor(x, y); });
 			} else {
-				G.forNeighborsOf(x, [&](node y) { procNeighbor(x, y); });
+				G.forNeighborsOf(x, [&](const node y) { procNeighbor(x, y); });
 			}
 		}
 
@@ -502,64 +610,79 @@ std::vector<node> SpSampler::randomPath() {
 		}
 	}
 
+	++globalTS;
+
 	if (spEdges.size() == 0) {
-		removeAllEdges(endQ);
-		std::fill(ballInd.begin(), ballInd.end(), 0);
-		return std::vector<node>();
+		resetSampler(endQ);
+		if (globalTS == 128) {
+			globalTS = 1;
+			std::fill(timestamp.begin(), timestamp.end(), 0);
+		}
+		return;
 	}
 
 	for (auto p : spEdges) {
 		totWeight += nPaths[p.first] * nPaths[p.second];
 	}
 
-	randomEdge = Aux::Random::integer(totWeight - 1);
-	std::vector<node> path;
+	std::uniform_int_distribution<node> wDistr(0, totWeight - 1);
+	randomEdge = wDistr(rng);
 
 	for (auto p : spEdges) {
 		curEdge += nPaths[p.first] * nPaths[p.second];
 		if (curEdge > randomEdge) {
-			backtrackPath(u, v, p.first, path);
-			backtrackPath(u, v, p.second, path);
+			backtrackPath(u, v, p.first);
+			backtrackPath(u, v, p.second);
 			break;
 		}
 	}
 
-	std::fill(ballInd.begin(), ballInd.end(), 0);
-	removeAllEdges(endQ);
-	return path;
+	if (globalTS == 128) {
+		globalTS = 1;
+		std::fill(timestamp.begin(), timestamp.end(), 0);
+	}
+
+	resetSampler(endQ);
 }
 
-void SpSampler::backtrackPath(const node u, const node v, const node start,
-                              std::vector<node> &path) {
-	if (start == u || start == v) {
+void SpSampler::backtrackPath(const node source, const node target,
+                              const node start) {
+	if (start == target || start == source) {
 		return;
 	}
 
+	frame->apx[start] += 1;
 	count totWeight = nPaths[start];
-	node randomPred, curPred = 0;
-	node w = 0;
+	std::uniform_int_distribution<node> wDistr(0, totWeight - 1);
+	const node randomPred = wDistr(rng);
 
-	path.push_back(start);
-	randomPred = Aux::Random::integer(totWeight - 1);
-	assert((pred.neighbors(start)).size() > 0);
-
-	for (node t : pred.neighbors(start)) {
-		w = t;
-		curPred += nPaths[v];
-		if (curPred > randomPred) {
-			break;
+	node curPred, w;
+	bool stop = false;
+	// TODO: update this in the case of directed graphs (use inNeighbors if
+	// ballind is 0x80)
+	G.forNeighborsOf(start, [&](const node t) {
+		if (!stop) {
+			if (dist[t] == dist[start] - 1 &&
+			    ((timestamp[start] & ballMask) == (timestamp[t] & ballMask))) {
+				w = t;
+				curPred += nPaths[target];
+				if (curPred > randomPred) {
+					stop = true;
+				}
+			}
 		}
-	}
+	});
 
-	if (w != u && w != v) {
-		backtrackPath(u, v, w, path);
+	if (w != source && w != target) {
+		backtrackPath(source, target, w);
 	}
 }
 
-void SpSampler::removeAllEdges(const count endQ) {
-	std::vector<node> resizedQ(endQ);
-	std::copy(q.begin(), q.begin() + endQ, resizedQ.begin());
-	pred.removeEdgesFromIsolatedSet(resizedQ);
+void SpSampler::resetSampler(const count endQ) {
+	for (count i = 0; i < endQ; ++i) {
+		dist[q[i]] = std::numeric_limits<count>::max();
+		nPaths[q[i]] = 0;
+	}
 }
 
 count SpSampler::getDegree(const Graph &graph, node z, bool useDegreeIn) {

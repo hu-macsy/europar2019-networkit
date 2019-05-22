@@ -149,12 +149,13 @@ void CurveballMaterialization::toGraphParallel(Graph &G) {
 
     std::vector < std::vector<edgeweight> > new_edgeWeights(numNodes);
     std::vector < std::vector<node> > new_outEdges(numNodes);
+		std::vector <count> outDeg(numNodes);
 
     // Add first half of edges and count missing edges for each node
     G.parallelForNodes([&](node nodeid) {
         const count degree =
             static_cast<count>(adjacencyList.cend(nodeid) - adjacencyList.cbegin(nodeid));
-        G.outDeg[nodeid] = degree;
+        outDeg[nodeid] = degree;
         missingEdgesCounts[nodeid] = adjacencyList.degreeAt(nodeid) - degree;
         new_outEdges[nodeid].reserve(degree);
         new_edgeWeights[nodeid].resize(degree, 1);
@@ -167,12 +168,12 @@ void CurveballMaterialization::toGraphParallel(Graph &G) {
 
     // Reserve the space
     G.parallelForNodes([&](node v) {
-        G.outEdges[v].reserve(G.outDeg[v] + missingEdgesCounts[v]);
+        G.outEdges[v].reserve(outDeg[v] + missingEdgesCounts[v]);
     });
 
     // Second half of the edges
     G.forNodes([&](node v) {
-        for (count neighbor_id = 0; neighbor_id < G.outDeg[v]; neighbor_id++) {
+        for (count neighbor_id = 0; neighbor_id < outDeg[v]; neighbor_id++) {
             const node u = G.outEdges[v][neighbor_id];
             G.outEdges[u].push_back(v);
         }
@@ -186,7 +187,7 @@ void CurveballMaterialization::toGraphParallel(Graph &G) {
 
     // Set node degrees
     G.parallelForNodes([&](node v) {
-        G.outDeg[v] = adjacencyList.degreeAt(v);
+        outDeg[v] = adjacencyList.degreeAt(v);
     });
 
     // Set number of self-loops
@@ -208,12 +209,13 @@ void CurveballMaterialization::toGraphSequential(Graph &G) {
 
     std::vector < std::vector<edgeweight> > new_edgeWeights(numNodes);
     std::vector < std::vector<node> > new_outEdges(numNodes);
+		std::vector<count> outDeg(numNodes);
 
     // Add first half of edges and count missing edges for each node
     G.forNodes([&](node nodeid) {
         const count degree =
             static_cast<count>(adjacencyList.cend(nodeid) - adjacencyList.cbegin(nodeid));
-        G.outDeg[nodeid] = degree;
+        outDeg[nodeid] = degree;
         missingEdgesCounts.push_back(adjacencyList.degreeAt(nodeid) - degree);
         new_outEdges[nodeid].reserve(degree);
         new_edgeWeights[nodeid].resize(degree, 1);
@@ -226,12 +228,12 @@ void CurveballMaterialization::toGraphSequential(Graph &G) {
 
     // Reserve the space
     G.forNodes([&](node v) {
-        G.outEdges[v].reserve(G.outDeg[v] + missingEdgesCounts[v]);
+        G.outEdges[v].reserve(outDeg[v] + missingEdgesCounts[v]);
     });
 
     // Second half of the edges
     G.forNodes([&](node v) {
-        for (count neighbor_id = 0; neighbor_id < G.outDeg[v]; neighbor_id++) {
+        for (count neighbor_id = 0; neighbor_id < outDeg[v]; neighbor_id++) {
             const node u = G.outEdges[v][neighbor_id];
             G.outEdges[u].push_back(v);
         }
@@ -245,7 +247,7 @@ void CurveballMaterialization::toGraphSequential(Graph &G) {
 
     // Set node degrees
     G.forNodes([&](node v) {
-        G.outDeg[v] = adjacencyList.degreeAt(v);
+        outDeg[v] = adjacencyList.degreeAt(v);
     });
 
     // Set number of self-loops
