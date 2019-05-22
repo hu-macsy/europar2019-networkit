@@ -261,26 +261,23 @@ void GraphBuilder::toGraphParallel(Graph& G) {
 
 		// collect 'second' half of the edges
 		if (directed) {
-			G.inDeg[v] = inDeg;
-			G.outDeg[v] = outDeg;
 			for (int tid = 0; tid < maxThreads; tid++) {
 				copyAndClear(inEdgesPerThread[tid][v], G.inEdges[v]);
 			}
-			assert(G.inDeg[v] == G.inEdges[v].size());
+			assert(G.inEdges[v].size() == G.inEdges[v].size());
 			if (weighted) {
 				for (int tid = 0; tid < maxThreads; tid++) {
 					copyAndClear(inWeightsPerThread[tid][v], G.inEdgeWeights[v]);
 				}
-				assert(G.inDeg[v] == G.inEdgeWeights[v].size());
+				assert(G.inEdges[v].size() == G.inEdgeWeights[v].size());
 			}
 
 		} else {
-			G.outDeg[v] = inDeg + outDeg;
-			assert(G.outDeg[v] <= n);
+//			assert(G.outDeg[v] <= n);
 			for (int tid = 0; tid < maxThreads; tid++) {
 				copyAndClear(inEdgesPerThread[tid][v], G.outEdges[v]);
 			}
-			assert(G.outDeg[v] == G.outEdges[v].size());
+//			assert(G.outDeg[v] == G.outEdges[v].size());
 			if (weighted) {
 				for (int tid = 0; tid < maxThreads; tid++) {
 					copyAndClear(inWeightsPerThread[tid][v], G.outEdgeWeights[v]);
@@ -302,9 +299,6 @@ void GraphBuilder::toGraphSequential(Graph &G) {
 	// 'first' half of the edges
 	G.outEdges.swap(outEdges);
 	G.outEdgeWeights.swap(outEdgeWeights);
-	parallelForNodes([&](node v) {
-		G.outDeg[v] = G.outEdges[v].size();
-	});
 
 	// count missing edges for each node
 	G.forNodes([&](node v) {
@@ -325,73 +319,62 @@ void GraphBuilder::toGraphSequential(Graph &G) {
 	if (directed) {
 		// directed: outEdges is complete, missing half edges are the inEdges
 		// missingEdgesCounts are our inDegrees
-		G.inDeg = missingEdgesCounts;
 
 		// reserve the exact amount of space needed
-		G.forNodes([&](node v) {
-			G.inEdges[v].reserve(G.inDeg[v]);
-			if (weighted) {
-				G.inEdgeWeights[v].reserve(G.inDeg[v]);
-			}
-		});
+//		G.forNodes([&](node v) {
+//			G.inEdges[v].reserve(G.inDeg[v]);
+//			if (weighted) {
+//				G.inEdgeWeights[v].reserve(G.inDeg[v]);
+//			}
+//		});
 
 		// copy values
-		G.forNodes([&](node v) {
-			for (index i = 0; i < G.outDeg[v]; i++) {
-				node u = G.outEdges[v][i];
-				G.inEdges[u].push_back(v);
-				if (weighted) {
-					edgeweight ew = G.outEdgeWeights[v][i];
-					G.inEdgeWeights[u].push_back(ew);
-				}
-			}
-		});
+//		G.forNodes([&](node v) {
+//			for (index i = 0; i < G.outDeg[v]; i++) {
+//				node u = G.outEdges[v][i];
+//				G.inEdges[u].push_back(v);
+//				if (weighted) {
+//					edgeweight ew = G.outEdgeWeights[v][i];
+//					G.inEdgeWeights[u].push_back(ew);
+//				}
+//			}
+//		});
 	} else {
 		// undirected: so far each edge is just saved at one node
 		// add it to the other node as well
 
 		// reserve the exact amount of space needed
-		G.forNodes([&](node v) {
-			G.outEdges[v].reserve(G.outDeg[v] + missingEdgesCounts[v]);
-			if (weighted) {
-				G.outEdgeWeights[v].reserve(G.outDeg[v] + missingEdgesCounts[v]);
-			}
-		});
+//		G.forNodes([&](node v) {
+//			G.outEdges[v].reserve(G.outDeg[v] + missingEdgesCounts[v]);
+//			if (weighted) {
+//				G.outEdgeWeights[v].reserve(G.outDeg[v] + missingEdgesCounts[v]);
+//			}
+//		});
 
 		// cope value
-		G.forNodes([&](node v) {
-			// the first G.outDeg[v] edges in G.outEdges[v] are the first half edges
-			// we are adding after G.outDeg[v]
-			for (index i = 0; i < G.outDeg[v]; i++) {
-				node u = G.outEdges[v][i];
-				if (u != v) {
-					G.outEdges[u].push_back(v);
-					if (weighted) {
-						edgeweight ew = G.outEdgeWeights[v][i];
-						G.outEdgeWeights[u].push_back(ew);
-					}
-				} else {
-					// ignore self loops here
-				}
-			}
-		});
+//		G.forNodes([&](node v) {
+//			// the first G.outDeg[v] edges in G.outEdges[v] are the first half edges
+//			// we are adding after G.outDeg[v]
+//			for (index i = 0; i < G.outDeg[v]; i++) {
+//				node u = G.outEdges[v][i];
+//				if (u != v) {
+//					G.outEdges[u].push_back(v);
+//					if (weighted) {
+//						edgeweight ew = G.outEdgeWeights[v][i];
+//						G.outEdgeWeights[u].push_back(ew);
+//					}
+//				} else {
+//					// ignore self loops here
+//				}
+//			}
+//		});
 
 		// correct degree
-		G.forNodes([&](node v) {
-			G.outDeg[v] += missingEdgesCounts[v];
-		});
 	}
 	G.storedNumberOfSelfLoops = numberOfSelfLoops;
 }
 
 void GraphBuilder::setDegrees(Graph& G) {
-	#pragma omp parallel for if(n > (1<<20))
-	for (omp_index v = 0; v < static_cast<omp_index>(n); v++) {
-		G.outDeg[v] = G.outEdges[v].size();
-		if (G.isDirected()) {
-			G.inDeg[v] = G.inEdges[v].size();
-		}
-	}
 }
 
 count GraphBuilder::numberOfEdges(const Graph& G) {
