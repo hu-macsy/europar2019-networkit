@@ -9,6 +9,8 @@
 #define KADABRA_H_
 
 #include <atomic>
+#include <random>
+#include <vector>
 
 #include "../auxiliary/SortedList.h"
 #include "../base/Algorithm.h"
@@ -16,6 +18,20 @@
 #include "../graph/Graph.h"
 
 namespace NetworKit {
+
+class StateFrame {
+public:
+	StateFrame(const count size) { apx.assign(size, 0); };
+	count nPairs = 0;
+	count epoch = 0;
+	std::vector<count> apx;
+
+	void reset(count newEpoch) {
+		std::fill(apx.begin(), apx.end(), 0);
+		nPairs = 0;
+		epoch = newEpoch;
+	}
+};
 
 class Status {
 public:
@@ -27,28 +43,31 @@ public:
 	std::vector<double> bet;
 	std::vector<double> errL;
 	std::vector<double> errU;
-	count nPairs;
 };
 
 class SpSampler {
 public:
 	SpSampler(const Graph &G, const ConnectedComponents &cc);
-	std::vector<node> randomPath();
+	void randomPath(StateFrame *curFrame);
+	StateFrame *frame;
+	std::mt19937_64 rng;
+	std::uniform_int_distribution<node> distr;
 
 private:
 	const Graph &G;
-	const count n;
-	Graph pred;
-	std::vector<count> ballInd;
+	std::vector<uint8_t> timestamp;
+	uint8_t globalTS = 1;
+	static constexpr uint8_t stampMask = 0x7F;
+	static constexpr uint8_t ballMask = 0x80;
 	std::vector<count> dist;
 	std::vector<count> nPaths;
 	std::vector<node> q;
 	const ConnectedComponents &cc;
+	std::vector<std::pair<node, node>> spEdges;
 
 	inline node randomNode() const;
-	void backtrackPath(const node u, const node v, const node start,
-	                   std::vector<node> &path);
-	void removeAllEdges(const count endQ);
+	void backtrackPath(const node source, const node target, const node start);
+	void resetSampler(const count endQ);
 	count getDegree(const Graph &graph, node y, bool useDegreeIn);
 };
 
@@ -87,8 +106,9 @@ public:
 	 *              chosen.
 	 */
 	KadabraBetweenness(const Graph &G, const double err = 0.01,
-	                   const double delta = 0.1, const count k = 0,
-	                   count unionSample = 0, const count startFactor = 100);
+	                   const double delta = 0.1, const bool deterministic = false,
+	                   const count k = 0, count unionSample = 0,
+	                   const count startFactor = 100);
 
 	/**
 	 * Executes the Kadabra algorithm.
@@ -143,46 +163,64 @@ public:
 		return omega;
 	}
 
+	count maxAllocatedFrames() const {
+		assureFinished();
+		count maxNFrames = 0;
+		for (auto nFrames : maxFrames) {
+			maxNFrames = std::max(nFrames, maxNFrames);
+		}
+		return maxNFrames;
+	}
+
+	double diamTime, firstPartTime, parRedTime, dGuessTime, secondPartTime,
+	    initialization, finalization;
+	uint32_t itersPerStep = 11;
+
 protected:
 	const Graph &G;
 	const double delta, err;
-	const count k, n, startFactor;
-	count unionSample, omp_max_threads;
-	std::atomic<std::uint64_t> nPairs;
+	const bool deterministic;
+	const count k, startFactor;
+	count unionSample;
+	count nPairs;
 	const bool absolute;
 	double deltaLMinGuess, deltaUMinGuess, omega;
+	std::atomic<int32_t> epochToRead;
+	int32_t epochRead;
+	count seed0, seed1;
+	std::vector<count> maxFrames;
 
 	std::vector<node> topkNodes;
 	std::vector<double> topkScores;
 	std::vector<std::pair<node, double>> rankingVector;
+	std::vector<std::atomic<StateFrame *>> epochFinished;
+	std::vector<SpSampler> samplerVec;
 	Aux::SortedList *top;
 	ConnectedComponents *cc;
 
-	std::vector<std::vector<double>> approx;
 	std::vector<double> approxSum;
 	std::vector<double> deltaLGuess;
 	std::vector<double> deltaUGuess;
 
-	const double balancingFactor = 0.001;
-	const unsigned short itersPerStep = 11;
+	std::atomic<bool> stop;
 
 	void init();
 	void computeDeltaGuess();
 	void computeBetErr(Status *status, std::vector<double> &bet,
 	                   std::vector<double> &errL,
 	                   std::vector<double> &errU) const;
-	void oneRound(SpSampler &sampler);
 	bool computeFinished(Status *status) const;
 	void getStatus(Status *status, const bool parallel = false) const;
-	void computeApproxParallel(const bool normalize = false);
+	void computeApproxParallel(const std::vector<StateFrame> &firstFrames);
 	double computeF(const double btilde, const count iterNum,
 	                const double deltaL) const;
 	double computeG(const double btilde, const count iterNum,
 	                const double deltaU) const;
 	void fillResult();
+	void checkConvergence(Status &status);
 
 	void fillPQ() {
-		for (count i = 0; i < n; ++i) {
+		for (count i = 0; i < G.upperNodeIdBound(); ++i) {
 			top->insert(i, approxSum[i]);
 		}
 	}
