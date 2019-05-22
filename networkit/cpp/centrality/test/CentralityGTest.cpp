@@ -1478,11 +1478,12 @@ TEST_F(CentralityGTest, testGroupCloseness) {
  */
 TEST_F(CentralityGTest, testKadabraAbsolute) {
 	Aux::Random::setSeed(42, true);
-	const count n = 10;
+	const count n = 300;
 	Graph g = ErdosRenyiGenerator(n, 0.1).generate();
 
 	const double delta = 0.1;
 	const double epsilon = 0.01;
+	Aux::Random::setSeed(42, true);
 	KadabraBetweenness kadabra(g, epsilon, delta);
 	kadabra.run();
 	auto scores = kadabra.topkScoresList();
@@ -1502,47 +1503,84 @@ TEST_F(CentralityGTest, testKadabraAbsolute) {
 	EXPECT_TRUE(errors <= maxErrors);
 }
 
+TEST_F(CentralityGTest, testKadabraAbsoluteDeterministic) {
+	const index seed = 42;
+	Aux::Random::setSeed(seed, true);
+	const count n = 300;
+	Graph g = ErdosRenyiGenerator(n, 0.1).generate();
+
+	const double delta = 0.1;
+	const double epsilon = 0.01;
+	Aux::Random::setSeed(seed, true);
+	KadabraBetweenness kadabra(g, epsilon, delta, true);
+	kadabra.run();
+	auto scores = kadabra.topkScoresList();
+	auto nodes = kadabra.topkNodesList();
+
+	Aux::Random::setSeed(seed, true);
+	KadabraBetweenness kadabra2(g, epsilon, delta, true);
+	kadabra2.run();
+	auto scores2 = kadabra2.topkScoresList();
+	auto nodes2 = kadabra2.topkNodesList();
+
+	for (count i = 0; i < n; ++i) {
+		EXPECT_EQ(scores[i], scores2[i]);
+	}
+}
+
 /**
  * This test succeeds with the fixed random seed (42).
  * However, the Kadabra algorithm finds the top-k nodes with
  * highest betweenness centrality with high probability. Thus, it is possible
  * that, for a different random seed, this test fails.
  */
-
 TEST_F(CentralityGTest, testKadabraTopK) {
 	Aux::Random::setSeed(42, true);
-	const count n = 10;
+	const count n = 300;
 	Graph g = ErdosRenyiGenerator(n, 0.1).generate();
 
 	const double delta = 0.1;
 	const double epsilon = 0.01;
-	const count k = 3;
-	KadabraBetweenness kadabra(g, epsilon, delta, k);
+	const count k = 5;
+	KadabraBetweenness kadabra(g, epsilon, delta, false, k);
 	kadabra.run();
 	auto kadabraRanking = kadabra.ranking();
 
 	Betweenness betweenness(g, true);
 	betweenness.run();
-	auto betwRanking = betweenness.ranking();
-	bool correctRanking = true;
+	auto betwScores = betweenness.scores();
+	auto ranking = betweenness.ranking();
 	for (count i = 0; i < k; ++i) {
-		if (betwRanking[i].first != kadabraRanking[i].first) {
-			correctRanking = false;
-			int j = static_cast<int>(i) - 1;
-			while (j >= 0 && betwRanking[j].second == betwRanking[i].second) {
-				--j;
-			}
-			++j;
-			while (j < n && betwRanking[j].second == betwRanking[i].second) {
-				if (betwRanking[j].first == kadabraRanking[i].first) {
-					correctRanking = true;
-					break;
-				}
-				++j;
-			}
+		auto elem = kadabraRanking[i];
+		if (ranking[i].first != elem.first) {
+			EXPECT_NEAR(elem.second, betwScores[elem.first], epsilon);
 		}
 	}
-	EXPECT_TRUE(correctRanking);
+}
+
+TEST_F(CentralityGTest, testKadabraTopKDeterministic) {
+	const index seed = 42;
+	Aux::Random::setSeed(seed, true);
+	const count n = 300;
+	Graph g = ErdosRenyiGenerator(n, 0.1).generate();
+
+	const double delta = 0.1;
+	const double epsilon = 0.01;
+	const count k = 5;
+	Aux::Random::setSeed(seed, true);
+	KadabraBetweenness kadabra(g, epsilon, delta, true, k);
+	kadabra.run();
+	auto ranking = kadabra.ranking();
+
+	Aux::Random::setSeed(seed, true);
+	KadabraBetweenness kadabra2(g, epsilon, delta, true, k);
+	kadabra2.run();
+	auto ranking2 = kadabra2.ranking();
+
+	for (count i = 0; i < k; ++i) {
+		EXPECT_EQ(ranking[i].first, ranking2[i].first);
+		EXPECT_EQ(ranking[i].second, ranking2[i].second);
+	}
 }
 
 TEST_F(CentralityGTest, testDynTopHarmonicClosenessUndirected) {

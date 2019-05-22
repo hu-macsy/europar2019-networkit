@@ -14,10 +14,22 @@ option(NETWORKIT_MONOLITH "Build single library (and tests is requested; require
 option(NETWORKIT_NATIVE "Optimize for native architecture (often better performance)" OFF)
 option(NETWORKIT_WARNINGS "Issue more warnings" OFF)
 option(NETWORKIT_INCLUDESYMLINK "Create symlink to cpp directory" ON)
+option(NETWORKIT_FLATINSTALL "Install into a flat directory structure (useful when building a Python package)" OFF)
 set(NETWORKIT_PYTHON "" CACHE STRING "Directory containing Python.h. Implies MONOLITH=TRUE")
 set(NETWORKIT_PYTHON_SOABI "" CACHE STRING "Platform specific file extension. Implies MONOLITH=TRUE")
 
-set( NETWORKIT_CXX_STANDARD "11" CACHE STRING "CXX Version to compile with. Currently fixed to 11")
+set (NETWORKIT_CXX_STANDARD "11" CACHE STRING "CXX Version to compile with. Currently fixed to 11")
+
+# Allow user to set installation paths relative to CMAKE_INSTALL_PREFIX
+
+set(NETWORKIT_INSTALL_BIN_DIR "bin"
+	CACHE PATH "Installation directory for executables")
+set(NETWORKIT_INSTALL_LIB_DIR "lib"
+	CACHE PATH "Installation directory for libraries")
+set(NETWORKIT_INSTALL_INCLUDE_DIR "include"
+	CACHE PATH "Installation directory for header files")
+set(NETWORKIT_INSTALL_PKGCONFIG_DIR "lib/pkgconfig"
+	CACHE PATH "Installation directory for pkg-config file")
 
 if (NETWORKIT_PYTHON)
 	if (NOT NETWORKIT_MONOLITH)
@@ -54,10 +66,10 @@ if (("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang") OR
 
 elseif (MSVC)
 	set(NETWORKIT_CXX_FLAGS "${NETWORKIT_CXX_FLAGS} /DNETWORKIT_OMP2 /MP /DNETWORKIT_WINDOWS")
-	
+
 	# TTMath requires running an ASM for MSVC which we disable here at the cost of worse performance
 	set(NETWORKIT_CXX_FLAGS "${NETWORKIT_CXX_FLAGS} /DTTMATH_NOASM=1")
-	 
+
 else()
 	message(WARNING "Support only GCC, Clang, MSVC and AppleClang. Your compiler may or may not work.")
 endif()
@@ -110,6 +122,12 @@ if(NOT NETWORKIT_BUILD_CORE)
 	find_library(EXTERNAL_NETWORKIT_CORE NAMES networkit DOC "External NetworKit core library")
 endif()
 
+if(NETWORKIT_FLATINSTALL)
+	set(NETWORKIT_LIB_DEST ".")
+else()
+	set(NETWORKIT_LIB_DEST "lib/")
+endif()
+
 ################################################################################
 # Use TLX as a CMake submodule
 if(EXISTS "${PROJECT_SOURCE_DIR}/extlibs/tlx/CMakeLists.txt")
@@ -146,8 +164,8 @@ if(NETWORKIT_BUILD_CORE AND NETWORKIT_MONOLITH)
 			LINK_FLAGS "${NETWORKIT_LINK_FLAGS}")
 
 	install(TARGETS networkit
-			LIBRARY DESTINATION .
-			ARCHIVE DESTINATION .)
+			LIBRARY DESTINATION ${NETWORKIT_LIB_DEST}
+			ARCHIVE DESTINATION ${NETWORKIT_LIB_DEST})
 
 	target_link_libraries(networkit PRIVATE tlx)
 endif()
@@ -184,7 +202,7 @@ if(NETWORKIT_PYTHON)
 				INSTALL_RPATH "$ORIGIN")
 	endif()
 	install(TARGETS _NetworKit
-			LIBRARY DESTINATION .)
+			LIBRARY DESTINATION ${NETWORKIT_LIB_DEST})
 endif()
 
 # Register a new NetworKit module named ${modname}
@@ -290,7 +308,7 @@ if (NETWORKIT_BUILD_TESTS)
 
 	if (NETWORKIT_MONOLITH)
 		add_executable(networkit_tests networkit/cpp/Unittests-X.cpp)
-		
+
 		target_link_libraries(networkit_tests
 			PRIVATE
 				gtest
@@ -481,3 +499,23 @@ endif()
 ################################################################################
 # Subdirectories
 add_subdirectory(networkit/cpp)
+
+# Install header files
+set(NETWORKIT_LIBRARIES networkit)
+install(DIRECTORY networkit/cpp/
+	DESTINATION ${NETWORKIT_INSTALL_INCLUDE_DIR}/networkit
+	FILES_MATCHING PATTERN "*.h")
+
+################################################################################
+# Prepare pkg-config file
+
+set(NETWORKIT_LIBNAME networkit)
+execute_process(COMMAND python3 -c "from version import version; print(version, end='')"
+	OUTPUT_VARIABLE NETWORKIT_VERSION)
+configure_file(networkit.pc
+	"${PROJECT_BINARY_DIR}/${NETWORKIT_LIBNAME}.pc" @ONLY)
+
+if(NETWORKIT_INSTALL_PKGCONFIG_DIR)
+	INSTALL(FILES ${PROJECT_BINARY_DIR}/${NETWORKIT_LIBNAME}.pc
+		DESTINATION ${NETWORKIT_INSTALL_PKGCONFIG_DIR})
+endif()
