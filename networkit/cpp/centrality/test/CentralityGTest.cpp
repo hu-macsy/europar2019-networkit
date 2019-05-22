@@ -1478,7 +1478,7 @@ TEST_F(CentralityGTest, testGroupCloseness) {
  */
 TEST_F(CentralityGTest, testKadabraAbsolute) {
 	Aux::Random::setSeed(42, true);
-	const count n = 10;
+	const count n = 30;
 	Graph g = ErdosRenyiGenerator(n, 0.1).generate();
 
 	const double delta = 0.1;
@@ -1511,38 +1511,26 @@ TEST_F(CentralityGTest, testKadabraAbsolute) {
 
 TEST_F(CentralityGTest, testKadabraTopK) {
 	Aux::Random::setSeed(42, true);
-	const count n = 10;
+	const count n = 300;
 	Graph g = ErdosRenyiGenerator(n, 0.1).generate();
 
 	const double delta = 0.1;
 	const double epsilon = 0.01;
-	const count k = 3;
+	const count k = 5;
 	KadabraBetweenness kadabra(g, epsilon, delta, k);
 	kadabra.run();
 	auto kadabraRanking = kadabra.ranking();
 
 	Betweenness betweenness(g, true);
 	betweenness.run();
-	auto betwRanking = betweenness.ranking();
-	bool correctRanking = true;
+	auto betwScores = betweenness.scores();
+	auto ranking = betweenness.ranking();
 	for (count i = 0; i < k; ++i) {
-		if (betwRanking[i].first != kadabraRanking[i].first) {
-			correctRanking = false;
-			int j = static_cast<int>(i) - 1;
-			while (j >= 0 && betwRanking[j].second == betwRanking[i].second) {
-				--j;
-			}
-			++j;
-			while (j < n && betwRanking[j].second == betwRanking[i].second) {
-				if (betwRanking[j].first == kadabraRanking[i].first) {
-					correctRanking = true;
-					break;
-				}
-				++j;
-			}
+		auto elem = kadabraRanking[i];
+		if (ranking[i].first != elem.first) {
+			EXPECT_NEAR(elem.second, betwScores[elem.first], epsilon);
 		}
 	}
-	EXPECT_TRUE(correctRanking);
 }
 
 TEST_F(CentralityGTest, testDynTopHarmonicClosenessUndirected) {

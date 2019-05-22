@@ -17,6 +17,26 @@
 
 namespace NetworKit {
 
+class StateFrame {
+public:
+	std::atomic<count> nPairs;
+	count epoch = 0;
+	std::vector<std::atomic<count>> apx;
+
+	void init(const count size) {
+		apx = std::vector<std::atomic<count>>(size);
+		nPairs.store(0, std::memory_order_relaxed);
+	}
+
+	void reset(count newEpoch) {
+		for (count i = 0; i < apx.size(); ++i) {
+			apx[i].store(0, std::memory_order_release);
+		}
+		nPairs.store(0, std::memory_order_release);
+		epoch = newEpoch;
+	}
+};
+
 class Status {
 public:
 	Status(const count k);
@@ -27,28 +47,29 @@ public:
 	std::vector<double> bet;
 	std::vector<double> errL;
 	std::vector<double> errU;
-	count nPairs;
 };
 
 class SpSampler {
 public:
 	SpSampler(const Graph &G, const ConnectedComponents &cc);
-	std::vector<node> randomPath();
+	void randomPath(StateFrame *frame);
+	StateFrame *frame;
 
 private:
 	const Graph &G;
-	const count n;
-	Graph pred;
-	std::vector<count> ballInd;
+	std::vector<uint8_t> timestamp;
+	uint8_t globalTS = 1;
+	static constexpr uint8_t stampMask = 0x7F;
+	static constexpr uint8_t ballMask = 0x80;
 	std::vector<count> dist;
 	std::vector<count> nPaths;
 	std::vector<node> q;
 	const ConnectedComponents &cc;
+	std::vector<std::pair<node, node>> spEdges;
 
 	inline node randomNode() const;
-	void backtrackPath(const node u, const node v, const node start,
-	                   std::vector<node> &path);
-	void removeAllEdges(const count endQ);
+	void backtrackPath(const node source, const node target, const node start);
+	void resetSampler(const count endQ);
 	count getDegree(const Graph &graph, node y, bool useDegreeIn);
 };
 
@@ -71,20 +92,20 @@ public:
 	 * The algorithm relies on an adaptive random sampling technique of shortest
 	 * paths and the number of samples in the worst case is w = ((log(D - 2) +
 	 * log(2/delta))/err^2 samples, where D is the diameter of the graph.
-	 * Thus, the worst-case performance is O(w * (|E| + |V|)), but performs better
-	 * in practice.
-	 * NB: in order to work properly the Kadabra algorithm requires a random seed
-	 * to be previously set with 'useThreadId' set to true.
+	 * Thus, the worst-case performance is O(w * (|E| + |V|)), but performs
+	 * better in practice. NB: in order to work properly the Kadabra algorithm
+	 * requires a random seed to be previously set with 'useThreadId' set to
+	 * true.
 	 *
 	 * @param G     the graph
 	 * @param err   maximum additive error guaranteed when approximating the
 	 *              betweenness centrality of all nodes.
-	 * @param delta probability that the values of the betweenness centrality are
-	 *              within the error guarantee.
+	 * @param delta probability that the values of the betweenness centrality
+	 * are within the error guarantee.
 	 * @param k     the number of top-k nodes to be computed. Set it to zero to
 	 *              approximate the betweenness centrality of all the nodes.
-	 * @param unionSample, startFactor algorithm parameters that are automatically
-	 *              chosen.
+	 * @param unionSample, startFactor algorithm parameters that are
+	 * automatically chosen.
 	 */
 	KadabraBetweenness(const Graph &G, const double err = 0.01,
 	                   const double delta = 0.1, const count k = 0,
@@ -143,46 +164,57 @@ public:
 		return omega;
 	}
 
+	double diamTime, firstPartTime, parRedTime, dGuessTime, secondPartTime,
+	    initialization, finalization;
+	double itersExp = 0;
+	uint32_t itersPerStep = 11;
+	count numberOfFrames = 2;
+
 protected:
 	const Graph &G;
 	const double delta, err;
-	const count k, n, startFactor;
-	count unionSample, omp_max_threads;
-	std::atomic<std::uint64_t> nPairs;
+	const count k, startFactor;
+	count unionSample;
+	count nPairs;
 	const bool absolute;
 	double deltaLMinGuess, deltaUMinGuess, omega;
+	std::atomic<int> epochToRead;
+	int epochRead;
 
 	std::vector<node> topkNodes;
 	std::vector<double> topkScores;
 	std::vector<std::pair<node, double>> rankingVector;
+	std::unique_ptr<std::array<StateFrame, 2>[]> epochs;
+	std::vector<std::atomic<StateFrame *>> epochFinished;
+	std::vector<int> epochToWrite;
+	std::vector<SpSampler> samplerVec;
 	Aux::SortedList *top;
 	ConnectedComponents *cc;
 
-	std::vector<std::vector<double>> approx;
 	std::vector<double> approxSum;
 	std::vector<double> deltaLGuess;
 	std::vector<double> deltaUGuess;
 
-	const double balancingFactor = 0.001;
-	const unsigned short itersPerStep = 11;
+	bool stop;
 
 	void init();
+	void clear();
 	void computeDeltaGuess();
 	void computeBetErr(Status *status, std::vector<double> &bet,
 	                   std::vector<double> &errL,
 	                   std::vector<double> &errU) const;
-	void oneRound(SpSampler &sampler);
 	bool computeFinished(Status *status) const;
 	void getStatus(Status *status, const bool parallel = false) const;
-	void computeApproxParallel(const bool normalize = false);
+	void computeApproxParallel();
 	double computeF(const double btilde, const count iterNum,
 	                const double deltaL) const;
 	double computeG(const double btilde, const count iterNum,
 	                const double deltaU) const;
 	void fillResult();
+	void checkConvergence(Status &status);
 
 	void fillPQ() {
-		for (count i = 0; i < n; ++i) {
+		for (count i = 0; i < G.upperNodeIdBound(); ++i) {
 			top->insert(i, approxSum[i]);
 		}
 	}
